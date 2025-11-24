@@ -1,8 +1,22 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+
+# ===========================
+# SAFE PLOTTING IMPORTS
+# ===========================
+HAS_MPL = True
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+except Exception:
+    HAS_MPL = False
+    st.warning(
+        "⚠️ matplotlib/seaborn not available on this server. "
+        "Using Streamlit/Plotly charts instead."
+    )
+
+import plotly.express as px
 
 from sklearn.model_selection import train_test_split, StratifiedKFold, RandomizedSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -53,8 +67,11 @@ if xlsx_up is None:
 # =====================================================
 # HELPERS (same as notebooks)
 # =====================================================
-def safe_mean(s): return pd.to_numeric(s, errors="coerce").mean()
-def safe_std(s):  return pd.to_numeric(s, errors="coerce").std()
+def safe_mean(s): 
+    return pd.to_numeric(s, errors="coerce").mean()
+
+def safe_std(s):  
+    return pd.to_numeric(s, errors="coerce").std()
 
 def cap_outliers_iqr(df, cols):
     df_out = df.copy()
@@ -89,7 +106,7 @@ def build_datetime(df):
 
         df["DATETIME"] = df["DATE"] + df["TIME_clean"]
 
-    # hour + TimeOfDay (simple, matches “Day vs Night” idea)
+    # hour + TimeOfDay
     df["hour"] = df["DATETIME"].dt.hour
     df["TimeOfDay"] = np.where((df["hour"] >= 18) | (df["hour"] < 6), "Night", "Day")
     return df
@@ -107,13 +124,12 @@ def load_detections_excel(uploaded_xlsx):
     sheet_names = xls.sheet_names
 
     # mixed sheet
+    df_owl_80830 = pd.DataFrame()
+    df_owl_80831 = pd.DataFrame()
     if "80830" in sheet_names:
         df_80830 = pd.read_excel(xls, sheet_name="80830")
         df_owl_80830 = df_80830[df_80830["motusTagID"] == 80830].copy()
         df_owl_80831 = df_80830[df_80830["motusTagID"] == 80831].copy()
-    else:
-        df_owl_80830 = pd.DataFrame()
-        df_owl_80831 = pd.DataFrame()
 
     all_dfs = []
     for s in sheet_names:
@@ -276,14 +292,14 @@ def run_models(owl_df):
                 ("scaler", StandardScaler(with_mean=False)),
                 ("clf", LogisticRegression(max_iter=3000, class_weight="balanced"))
             ]),
-            "params": {"clf_C": np.logspace(-2,2,12), "clf_solver":["lbfgs","liblinear"]}
+            "params": {"clf__C": np.logspace(-2,2,12), "clf__solver":["lbfgs","liblinear"]}
         },
         "SVC": {
             "estimator": Pipeline([
                 ("scaler", StandardScaler(with_mean=False)),
                 ("clf", SVC(class_weight="balanced"))
             ]),
-            "params": {"clf_C": np.logspace(-2,2,12), "clf_gamma":["scale","auto"]}
+            "params": {"clf__C": np.logspace(-2,2,12), "clf__gamma":["scale","auto"]}
         },
         "RandomForest": {
             "estimator": RandomForestClassifier(class_weight="balanced_subsample", random_state=42),
@@ -351,31 +367,38 @@ owl_df, reg_results, best_reg_name, y_test, best_pred, cls_results, best_cls_nam
 # =====================================================
 tab1, tab2, tab3, tab4 = st.tabs([
     "📊 EDA (detections)",
-    "🛠 Feature Engineering",
+    "🛠️ Feature Engineering",
     "🤖 Modeling",
     "📌 Final Results"
 ])
 
+# ---------------- TAB 1 ----------------
 with tab1:
     st.header("Detections Dataset (combined from Excel sheets)")
     st.dataframe(df_combined.head(30))
     st.write("Shape:", df_combined.shape)
 
     st.subheader("Hourly detections")
-    fig, ax = plt.subplots(figsize=(8,4))
-    sns.histplot(df_combined["hour"], bins=24, ax=ax)
-    ax.set_title("Hourly Detection Frequency")
-    ax.set_xlabel("Hour")
-    st.pyplot(fig)
+    if HAS_MPL:
+        fig, ax = plt.subplots(figsize=(8,4))
+        sns.histplot(df_combined["hour"], bins=24, ax=ax)
+        ax.set_title("Hourly Detection Frequency")
+        ax.set_xlabel("Hour")
+        st.pyplot(fig)
+    else:
+        hour_counts = df_combined["hour"].value_counts().sort_index()
+        st.bar_chart(hour_counts)
 
     st.subheader("Night vs Day (%)")
-    night_day = df_combined["TimeOfDay"].value_counts(normalize=True)*100
-    fig, ax = plt.subplots(figsize=(6,4))
-    night_day.plot(kind="bar", ax=ax)
-    ax.set_ylabel("Percentage %")
-    ax.set_title("Night vs Day Detection Percentage")
-    st.pyplot(fig)
+    night_day = (df_combined["TimeOfDay"]
+                 .value_counts(normalize=True) * 100).reset_index()
+    night_day.columns = ["TimeOfDay", "Percent"]
+    fig = px.bar(night_day, x="TimeOfDay", y="Percent",
+                 title="Night vs Day Detection Percentage")
+    st.plotly_chart(fig, use_container_width=True)
 
+
+# ---------------- TAB 2 ----------------
 with tab2:
     st.header("Feature Engineering Outputs")
 
@@ -394,18 +417,21 @@ with tab2:
     st.subheader("Owl-level dataset (engineered)")
     st.dataframe(owl_df.head(25))
 
+
+# ---------------- TAB 3 ----------------
 with tab3:
     st.header("Modeling Results")
 
     st.subheader("Regression model comparison")
     st.dataframe(reg_results)
 
-    fig, ax = plt.subplots(figsize=(6,5))
-    ax.scatter(y_test, best_pred, alpha=0.7)
-    ax.set_xlabel("True stay duration (days)")
-    ax.set_ylabel("Predicted stay duration (days)")
-    ax.set_title(f"Best Regression Model: {best_reg_name}")
-    st.pyplot(fig)
+    fig = px.scatter(
+        x=y_test,
+        y=best_pred,
+        labels={"x":"True stay duration (days)", "y":"Predicted stay duration (days)"},
+        title=f"Best Regression Model: {best_reg_name}"
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("---")
     st.subheader("Classification model comparison")
@@ -414,21 +440,18 @@ with tab3:
     st.text("Classification Report:")
     st.text(report)
 
-    fig, ax = plt.subplots(figsize=(5,4))
-    sns.heatmap(cm, annot=True, fmt="d",
-                xticklabels=class_names,
-                yticklabels=class_names, ax=ax)
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("True")
-    ax.set_title(f"Confusion Matrix — {best_cls_name}")
-    st.pyplot(fig)
+    cm_df = pd.DataFrame(cm, index=class_names, columns=class_names)
+    st.subheader("Confusion Matrix (table)")
+    st.dataframe(cm_df)
 
+
+# ---------------- TAB 4 ----------------
 with tab4:
     st.header("Final Summary (simple view)")
 
-    st.write(f"✅ Total owls analyzed: *{owl_df['motusTagID'].nunique()}*")
-    st.write(f"✅ Best regression model: *{best_reg_name}*")
-    st.write(f"✅ Best classification model: *{best_cls_name}*")
+    st.write(f"✅ Total owls analyzed: **{owl_df['motusTagID'].nunique()}**")
+    st.write(f"✅ Best regression model: **{best_reg_name}**")
+    st.write(f"✅ Best classification model: **{best_cls_name}**")
 
     st.subheader("Residency distribution")
     st.bar_chart(owl_df["ResidencyType_true"].value_counts())

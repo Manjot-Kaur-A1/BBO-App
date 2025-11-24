@@ -67,10 +67,10 @@ if xlsx_up is None:
 # =====================================================
 # HELPERS (same as notebooks)
 # =====================================================
-def safe_mean(s):
+def safe_mean(s): 
     return pd.to_numeric(s, errors="coerce").mean()
 
-def safe_std(s):
+def safe_std(s):  
     return pd.to_numeric(s, errors="coerce").std()
 
 def cap_outliers_iqr(df, cols):
@@ -111,6 +111,12 @@ def build_datetime(df):
 
 @st.cache_data
 def load_detections_excel(uploaded_xlsx):
+    """
+    Exactly like your EDA notebook:
+    - read all sheets
+    - split sheet 80830 into 80830 + 80831
+    - concatenate
+    """
     xls = pd.ExcelFile(uploaded_xlsx)
     sheet_names = xls.sheet_names
 
@@ -129,10 +135,8 @@ def load_detections_excel(uploaded_xlsx):
         temp["motusTagID_sheet"] = pd.to_numeric(s, errors="coerce")
         all_dfs.append(temp)
 
-    if len(df_owl_80830) > 0:
-        all_dfs.append(df_owl_80830)
-    if len(df_owl_80831) > 0:
-        all_dfs.append(df_owl_80831)
+    if len(df_owl_80830) > 0: all_dfs.append(df_owl_80830)
+    if len(df_owl_80831) > 0: all_dfs.append(df_owl_80831)
 
     df_combined = pd.concat(all_dfs, ignore_index=True)
 
@@ -186,37 +190,38 @@ def feature_engineer(df_combined, meta_one=None):
 @st.cache_data
 def build_owl_level(combined_final):
     first_det = combined_final.groupby("motusTagID")["DATETIME"].min()
-    last_det = combined_final.groupby("motusTagID")["DATETIME"].max()
+    last_det  = combined_final.groupby("motusTagID")["DATETIME"].max()
     stay_true = (last_det - first_det).dt.total_seconds() / (3600 * 24)
     stay_true = stay_true.clip(lower=0).reset_index()
     stay_true.columns = ["motusTagID", "stay_duration_days"]
 
-    num_cols = ["snr","sigsd","freq","freqsd","slop","burstSlop",
-                "antBearing","port","nodeNum","runLen","hour"]
+    num_cols = ["snr","sigsd","freq","freqsd","slop","burstSlop","antBearing","port","nodeNum","runLen","hour"]
     num_cols = [c for c in num_cols if c in combined_final.columns]
 
     agg_dict = {"detections_count": ("motusTagID", "size")}
     for c in num_cols:
         agg_dict[f"{c}_mean"] = (c, safe_mean)
-        agg_dict[f"{c}_std"] = (c, safe_std)
+        agg_dict[f"{c}_std"]  = (c, safe_std)
 
     owl_features = combined_final.groupby("motusTagID").agg(**agg_dict).reset_index()
-
     owl_df = owl_features.merge(stay_true, on="motusTagID", how="left")
 
     bins = [0, 3, 7, np.inf]
     labels = ["Vagrant", "Migrant", "Resident"]
     owl_df["ResidencyType_true"] = pd.cut(
-        owl_df["stay_duration_days"], bins=bins, labels=labels, include_lowest=True
+        owl_df["stay_duration_days"],
+        bins=bins, labels=labels, include_lowest=True
     )
 
     return owl_df
 
 
 def run_models(owl_df):
+    st.info("✅ App version: SAFE-CV v2 (no 5-fold errors)")
+
     # ---------------- REGRESSION ----------------
     y_reg = owl_df["stay_duration_days"]
-    drop_cols = ["motusTagID", "stay_duration_days", "ResidencyType_true"]
+    drop_cols = ["motusTagID","stay_duration_days","ResidencyType_true"]
     X = owl_df.drop(columns=[c for c in drop_cols if c in owl_df.columns], errors="ignore")
 
     X = X.select_dtypes(include=[np.number]).copy()
@@ -243,6 +248,7 @@ def run_models(owl_df):
     for name, model in reg_models.items():
         model.fit(X_train, y_train)
         pred = model.predict(X_test)
+
         rows.append({
             "Model": name,
             "R2": r2_score(y_test, pred),
@@ -263,8 +269,12 @@ def run_models(owl_df):
     le = LabelEncoder()
     y_cls_enc = le.fit_transform(y_cls)
 
+    class_counts = np.bincount(y_cls_enc)
+    can_stratify = class_counts.min() >= 2
+
     Xc_train, Xc_test, yc_train, yc_test = train_test_split(
-        X_imp, y_cls_enc, test_size=0.2, random_state=42, stratify=y_cls_enc
+        X_imp, y_cls_enc, test_size=0.2, random_state=42,
+        stratify=y_cls_enc if can_stratify else None
     )
 
     candidates = {
@@ -273,57 +283,59 @@ def run_models(owl_df):
                 ("scaler", StandardScaler(with_mean=False)),
                 ("clf", LogisticRegression(max_iter=3000, class_weight="balanced"))
             ]),
-            "params": {"clf__C": np.logspace(-2, 2, 12),
-                       "clf__solver": ["lbfgs", "liblinear"]}
+            "params": {"clf__C": np.logspace(-2,2,12), "clf__solver":["lbfgs","liblinear"]}
         },
         "SVC": {
             "estimator": Pipeline([
                 ("scaler", StandardScaler(with_mean=False)),
                 ("clf", SVC(class_weight="balanced"))
             ]),
-            "params": {"clf__C": np.logspace(-2, 2, 12),
-                       "clf__gamma": ["scale", "auto"]}
+            "params": {"clf__C": np.logspace(-2,2,12), "clf__gamma":["scale","auto"]}
         },
         "RandomForest": {
-            "estimator": RandomForestClassifier(
-                class_weight="balanced_subsample", random_state=42
-            ),
-            "params": {"n_estimators": [200, 400, 800],
-                       "max_depth": [None, 6, 12, 20],
-                       "min_samples_leaf": [1, 2, 4, 6]}
+            "estimator": RandomForestClassifier(class_weight="balanced_subsample", random_state=42),
+            "params": {
+                "n_estimators":[200,400,800],
+                "max_depth":[None,6,12,20],
+                "min_samples_leaf":[1,2,4,6]
+            }
         }
     }
 
-    # ================================
-    # SAFE CROSS-VALIDATION SETTINGS
-    # ================================
-    class_counts = np.bincount(y_cls_enc)
-    min_class = class_counts.min()
-    n_splits = int(min(5, min_class))
-    if n_splits < 2:
-        n_splits = 2
-
-    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    st.info(f"Using StratifiedKFold with n_splits={n_splits} (smallest class has {min_class} samples)")
+    # ✅ FIXED SAFE CV (ALWAYS 2)
+    cv = StratifiedKFold(n_splits=2, shuffle=True, random_state=42)
+    st.info(f"Using SAFE StratifiedKFold with n_splits=2 (min class size={class_counts.min()})")
 
     cls_rows, best_models = [], {}
-    for name, cfg in candidates.items():
-        search = RandomizedSearchCV(
-            cfg["estimator"], cfg["params"],
-            n_iter=20, scoring="f1_macro",
-            cv=cv, random_state=42, n_jobs=-1
-        )
-        search.fit(Xc_train, yc_train)
 
-        best_models[name] = search.best_estimator_
+    for name, cfg in candidates.items():
+        try:
+            search = RandomizedSearchCV(
+                cfg["estimator"], cfg["params"],
+                n_iter=15, scoring="f1_macro",
+                cv=cv, random_state=42, n_jobs=-1,
+                error_score="raise"
+            )
+            search.fit(Xc_train, yc_train)
+            best_models[name] = search.best_estimator_
+            best_score = search.best_score_
+            params_used = search.best_params_
+        except Exception:
+            st.warning(f"{name} CV failed due to small class size. Using direct fit.")
+            model = cfg["estimator"]
+            model.fit(Xc_train, yc_train)
+            best_models[name] = model
+            best_score = np.nan
+            params_used = "direct_fit"
+
         pred = best_models[name].predict(Xc_test)
 
         cls_rows.append({
             "Model": name,
-            "BestCV_F1": search.best_score_,
+            "BestCV_F1": best_score,
             "Test_F1": f1_score(yc_test, pred, average="macro"),
             "Test_Acc": accuracy_score(yc_test, pred),
-            "BestParams": search.best_params_
+            "BestParams": params_used
         })
 
     cls_results = pd.DataFrame(cls_rows).sort_values("Test_F1", ascending=False)
@@ -340,8 +352,7 @@ def run_models(owl_df):
     )
     cm = confusion_matrix(yc_test, yc_pred, labels=all_labels)
 
-    return (owl_df, reg_results, best_reg_name, y_test, best_pred,
-            cls_results, best_cls_name, report, cm, le.classes_)
+    return owl_df, reg_results, best_reg_name, y_test, best_pred, cls_results, best_cls_name, report, cm, le.classes_
 
 
 # =====================================================
@@ -353,8 +364,7 @@ meta_one = load_meta_csv(meta_up)
 df_combined, df_capped, df_final, combined_final, to_drop = feature_engineer(df_combined, meta_one)
 owl_df = build_owl_level(combined_final)
 
-(owl_df, reg_results, best_reg_name, y_test, best_pred,
- cls_results, best_cls_name, report, cm, class_names) = run_models(owl_df)
+owl_df, reg_results, best_reg_name, y_test, best_pred, cls_results, best_cls_name, report, cm, class_names = run_models(owl_df)
 
 
 # =====================================================
@@ -367,6 +377,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📌 Final Results"
 ])
 
+# ---------------- TAB 1 ----------------
 with tab1:
     st.header("Detections Dataset (combined from Excel sheets)")
     st.dataframe(df_combined.head(30))
@@ -374,7 +385,7 @@ with tab1:
 
     st.subheader("Hourly detections")
     if HAS_MPL:
-        fig, ax = plt.subplots(figsize=(8, 4))
+        fig, ax = plt.subplots(figsize=(8,4))
         sns.histplot(df_combined["hour"], bins=24, ax=ax)
         ax.set_title("Hourly Detection Frequency")
         ax.set_xlabel("Hour")
@@ -391,6 +402,8 @@ with tab1:
                  title="Night vs Day Detection Percentage")
     st.plotly_chart(fig, use_container_width=True)
 
+
+# ---------------- TAB 2 ----------------
 with tab2:
     st.header("Feature Engineering Outputs")
 
@@ -409,6 +422,8 @@ with tab2:
     st.subheader("Owl-level dataset (engineered)")
     st.dataframe(owl_df.head(25))
 
+
+# ---------------- TAB 3 ----------------
 with tab3:
     st.header("Modeling Results")
 
@@ -418,7 +433,7 @@ with tab3:
     fig = px.scatter(
         x=y_test,
         y=best_pred,
-        labels={"x": "True stay duration (days)", "y": "Predicted stay duration (days)"},
+        labels={"x":"True stay duration (days)", "y":"Predicted stay duration (days)"},
         title=f"Best Regression Model: {best_reg_name}"
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -434,6 +449,8 @@ with tab3:
     st.subheader("Confusion Matrix (table)")
     st.dataframe(cm_df)
 
+
+# ---------------- TAB 4 ----------------
 with tab4:
     st.header("Final Summary (simple view)")
 

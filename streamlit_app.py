@@ -1,3 +1,15 @@
+import sys, subprocess, importlib
+
+def ensure(pkg):
+    try:
+        importlib.import_module(pkg)
+    except Exception:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+
+# Force-install required libraries
+for p in ["openpyxl", "scikit-learn", "plotly", "matplotlib", "seaborn"]:
+    ensure(p)
+
 import streamlit as st
 import pandas as pd
 import numpy as np

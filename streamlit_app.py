@@ -323,7 +323,23 @@ def run_models(owl_df):
         }
     }
 
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    # ================================
+# SAFE CROSS-VALIDATION SETTINGS
+# ================================
+
+# Count samples in each class
+    class_counts = np.bincount(y_cls_enc)
+    min_class = class_counts.min()
+
+# Choose safe n_splits based on smallest class count
+    n_splits = int(min(5, min_class))
+    if n_splits < 2:
+        n_splits = 2  # Minimum allowed for CV
+
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+    st.info(f"Using StratifiedKFold with n_splits={n_splits} (smallest class has {min_class} samples)")
+
     cls_rows, best_models = [], {}
 
     for name, cfg in candidates.items():

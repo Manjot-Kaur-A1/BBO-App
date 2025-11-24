@@ -1,15 +1,3 @@
-import sys, subprocess, importlib
-
-def ensure(pkg):
-    try:
-        importlib.import_module(pkg)
-    except Exception:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
-
-# Force-install required libraries
-for p in ["openpyxl", "scikit-learn", "plotly", "matplotlib", "seaborn"]:
-    ensure(p)
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -79,10 +67,10 @@ if xlsx_up is None:
 # =====================================================
 # HELPERS (same as notebooks)
 # =====================================================
-def safe_mean(s): 
+def safe_mean(s):
     return pd.to_numeric(s, errors="coerce").mean()
 
-def safe_std(s):  
+def safe_std(s):
     return pd.to_numeric(s, errors="coerce").std()
 
 def cap_outliers_iqr(df, cols):
@@ -103,13 +91,11 @@ def build_datetime(df):
     if "DATETIME" in df.columns:
         df["DATETIME"] = pd.to_datetime(df["DATETIME"], errors="coerce")
     else:
-        # DATE
         if "DATE" in df.columns:
             df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
         else:
             df["DATE"] = pd.NaT
 
-        # TIME -> extract HH:MM:SS
         if "TIME" in df.columns:
             time_str = df["TIME"].astype(str).str.extract(r"(\d{1,2}:\d{2}:\d{2})")[0]
             df["TIME_clean"] = pd.to_timedelta(time_str, errors="coerce")
@@ -118,7 +104,6 @@ def build_datetime(df):
 
         df["DATETIME"] = df["DATE"] + df["TIME_clean"]
 
-    # hour + TimeOfDay
     df["hour"] = df["DATETIME"].dt.hour
     df["TimeOfDay"] = np.where((df["hour"] >= 18) | (df["hour"] < 6), "Night", "Day")
     return df
@@ -126,16 +111,9 @@ def build_datetime(df):
 
 @st.cache_data
 def load_detections_excel(uploaded_xlsx):
-    """
-    Exactly like your EDA notebook:
-    - read all sheets
-    - split sheet 80830 into 80830 + 80831
-    - concatenate
-    """
     xls = pd.ExcelFile(uploaded_xlsx)
     sheet_names = xls.sheet_names
 
-    # mixed sheet
     df_owl_80830 = pd.DataFrame()
     df_owl_80831 = pd.DataFrame()
     if "80830" in sheet_names:
@@ -151,12 +129,13 @@ def load_detections_excel(uploaded_xlsx):
         temp["motusTagID_sheet"] = pd.to_numeric(s, errors="coerce")
         all_dfs.append(temp)
 
-    if len(df_owl_80830) > 0: all_dfs.append(df_owl_80830)
-    if len(df_owl_80831) > 0: all_dfs.append(df_owl_80831)
+    if len(df_owl_80830) > 0:
+        all_dfs.append(df_owl_80830)
+    if len(df_owl_80831) > 0:
+        all_dfs.append(df_owl_80831)
 
     df_combined = pd.concat(all_dfs, ignore_index=True)
 
-    # standardize motusTagID (fallback to sheet label)
     if "motusTagID" not in df_combined.columns:
         df_combined["motusTagID"] = df_combined["motusTagID_sheet"]
     df_combined["motusTagID"] = pd.to_numeric(df_combined["motusTagID"], errors="coerce")
@@ -170,7 +149,6 @@ def load_meta_csv(uploaded_csv):
         return None
     meta = pd.read_csv(uploaded_csv, low_memory=False)
 
-    # standardize ID col
     if "motusTagID" not in meta.columns and "tag_id" in meta.columns:
         meta = meta.rename(columns={"tag_id": "motusTagID"})
 
@@ -181,14 +159,11 @@ def load_meta_csv(uploaded_csv):
 
 @st.cache_data
 def feature_engineer(df_combined, meta_one=None):
-    # DATETIME, hour, TimeOfDay
     df_combined = build_datetime(df_combined)
 
-    # Outlier capping
     numeric_cols = ["snr", "sig", "noise", "freq"]
     df_capped = cap_outliers_iqr(df_combined, numeric_cols)
 
-    # Correlation drop @ 0.85
     num_cols = ["snr", "sig", "sigsd", "noise", "freq", "freqsd", "burstSlop", "slop"]
     num_cols = [c for c in num_cols if c in df_capped.columns]
 
@@ -201,7 +176,6 @@ def feature_engineer(df_combined, meta_one=None):
     else:
         df_final = df_capped.copy()
 
-    # merge metadata per motusTagID
     combined_final = df_final
     if meta_one is not None:
         combined_final = df_final.merge(meta_one, on="motusTagID", how="left")
@@ -211,32 +185,29 @@ def feature_engineer(df_combined, meta_one=None):
 
 @st.cache_data
 def build_owl_level(combined_final):
-    # True stay duration
     first_det = combined_final.groupby("motusTagID")["DATETIME"].min()
-    last_det  = combined_final.groupby("motusTagID")["DATETIME"].max()
+    last_det = combined_final.groupby("motusTagID")["DATETIME"].max()
     stay_true = (last_det - first_det).dt.total_seconds() / (3600 * 24)
     stay_true = stay_true.clip(lower=0).reset_index()
     stay_true.columns = ["motusTagID", "stay_duration_days"]
 
-    # Owl-level aggregates
-    num_cols = ["snr","sigsd","freq","freqsd","slop","burstSlop","antBearing","port","nodeNum","runLen","hour"]
+    num_cols = ["snr","sigsd","freq","freqsd","slop","burstSlop",
+                "antBearing","port","nodeNum","runLen","hour"]
     num_cols = [c for c in num_cols if c in combined_final.columns]
 
     agg_dict = {"detections_count": ("motusTagID", "size")}
     for c in num_cols:
         agg_dict[f"{c}_mean"] = (c, safe_mean)
-        agg_dict[f"{c}_std"]  = (c, safe_std)
+        agg_dict[f"{c}_std"] = (c, safe_std)
 
     owl_features = combined_final.groupby("motusTagID").agg(**agg_dict).reset_index()
 
     owl_df = owl_features.merge(stay_true, on="motusTagID", how="left")
 
-    # Residency bins
     bins = [0, 3, 7, np.inf]
     labels = ["Vagrant", "Migrant", "Resident"]
     owl_df["ResidencyType_true"] = pd.cut(
-        owl_df["stay_duration_days"],
-        bins=bins, labels=labels, include_lowest=True
+        owl_df["stay_duration_days"], bins=bins, labels=labels, include_lowest=True
     )
 
     return owl_df
@@ -245,7 +216,7 @@ def build_owl_level(combined_final):
 def run_models(owl_df):
     # ---------------- REGRESSION ----------------
     y_reg = owl_df["stay_duration_days"]
-    drop_cols = ["motusTagID","stay_duration_days","ResidencyType_true"]
+    drop_cols = ["motusTagID", "stay_duration_days", "ResidencyType_true"]
     X = owl_df.drop(columns=[c for c in drop_cols if c in owl_df.columns], errors="ignore")
 
     X = X.select_dtypes(include=[np.number]).copy()
@@ -272,7 +243,6 @@ def run_models(owl_df):
     for name, model in reg_models.items():
         model.fit(X_train, y_train)
         pred = model.predict(X_test)
-
         rows.append({
             "Model": name,
             "R2": r2_score(y_test, pred),
@@ -285,7 +255,6 @@ def run_models(owl_df):
     best_reg = reg_models[best_reg_name]
     best_pred = pred_store[best_reg_name]
 
-    # Fit best on full data + predict all owls
     best_reg.fit(X_imp, y_reg)
     owl_df["predicted_stay_days"] = best_reg.predict(X_imp)
 
@@ -304,44 +273,40 @@ def run_models(owl_df):
                 ("scaler", StandardScaler(with_mean=False)),
                 ("clf", LogisticRegression(max_iter=3000, class_weight="balanced"))
             ]),
-            "params": {"clf__C": np.logspace(-2,2,12), "clf__solver":["lbfgs","liblinear"]}
+            "params": {"clf__C": np.logspace(-2, 2, 12),
+                       "clf__solver": ["lbfgs", "liblinear"]}
         },
         "SVC": {
             "estimator": Pipeline([
                 ("scaler", StandardScaler(with_mean=False)),
                 ("clf", SVC(class_weight="balanced"))
             ]),
-            "params": {"clf__C": np.logspace(-2,2,12), "clf__gamma":["scale","auto"]}
+            "params": {"clf__C": np.logspace(-2, 2, 12),
+                       "clf__gamma": ["scale", "auto"]}
         },
         "RandomForest": {
-            "estimator": RandomForestClassifier(class_weight="balanced_subsample", random_state=42),
-            "params": {
-                "n_estimators":[200,400,800],
-                "max_depth":[None,6,12,20],
-                "min_samples_leaf":[1,2,4,6]
-            }
+            "estimator": RandomForestClassifier(
+                class_weight="balanced_subsample", random_state=42
+            ),
+            "params": {"n_estimators": [200, 400, 800],
+                       "max_depth": [None, 6, 12, 20],
+                       "min_samples_leaf": [1, 2, 4, 6]}
         }
     }
 
     # ================================
-# SAFE CROSS-VALIDATION SETTINGS
-# ================================
-
-# Count samples in each class
+    # SAFE CROSS-VALIDATION SETTINGS
+    # ================================
     class_counts = np.bincount(y_cls_enc)
     min_class = class_counts.min()
-
-# Choose safe n_splits based on smallest class count
     n_splits = int(min(5, min_class))
     if n_splits < 2:
-        n_splits = 2  # Minimum allowed for CV
+        n_splits = 2
 
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-
     st.info(f"Using StratifiedKFold with n_splits={n_splits} (smallest class has {min_class} samples)")
 
     cls_rows, best_models = [], {}
-
     for name, cfg in candidates.items():
         search = RandomizedSearchCV(
             cfg["estimator"], cfg["params"],
@@ -375,7 +340,8 @@ def run_models(owl_df):
     )
     cm = confusion_matrix(yc_test, yc_pred, labels=all_labels)
 
-    return owl_df, reg_results, best_reg_name, y_test, best_pred, cls_results, best_cls_name, report, cm, le.classes_
+    return (owl_df, reg_results, best_reg_name, y_test, best_pred,
+            cls_results, best_cls_name, report, cm, le.classes_)
 
 
 # =====================================================
@@ -387,7 +353,8 @@ meta_one = load_meta_csv(meta_up)
 df_combined, df_capped, df_final, combined_final, to_drop = feature_engineer(df_combined, meta_one)
 owl_df = build_owl_level(combined_final)
 
-owl_df, reg_results, best_reg_name, y_test, best_pred, cls_results, best_cls_name, report, cm, class_names = run_models(owl_df)
+(owl_df, reg_results, best_reg_name, y_test, best_pred,
+ cls_results, best_cls_name, report, cm, class_names) = run_models(owl_df)
 
 
 # =====================================================
@@ -400,7 +367,6 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "📌 Final Results"
 ])
 
-# ---------------- TAB 1 ----------------
 with tab1:
     st.header("Detections Dataset (combined from Excel sheets)")
     st.dataframe(df_combined.head(30))
@@ -408,7 +374,7 @@ with tab1:
 
     st.subheader("Hourly detections")
     if HAS_MPL:
-        fig, ax = plt.subplots(figsize=(8,4))
+        fig, ax = plt.subplots(figsize=(8, 4))
         sns.histplot(df_combined["hour"], bins=24, ax=ax)
         ax.set_title("Hourly Detection Frequency")
         ax.set_xlabel("Hour")
@@ -425,8 +391,6 @@ with tab1:
                  title="Night vs Day Detection Percentage")
     st.plotly_chart(fig, use_container_width=True)
 
-
-# ---------------- TAB 2 ----------------
 with tab2:
     st.header("Feature Engineering Outputs")
 
@@ -445,8 +409,6 @@ with tab2:
     st.subheader("Owl-level dataset (engineered)")
     st.dataframe(owl_df.head(25))
 
-
-# ---------------- TAB 3 ----------------
 with tab3:
     st.header("Modeling Results")
 
@@ -456,7 +418,7 @@ with tab3:
     fig = px.scatter(
         x=y_test,
         y=best_pred,
-        labels={"x":"True stay duration (days)", "y":"Predicted stay duration (days)"},
+        labels={"x": "True stay duration (days)", "y": "Predicted stay duration (days)"},
         title=f"Best Regression Model: {best_reg_name}"
     )
     st.plotly_chart(fig, use_container_width=True)
@@ -472,8 +434,6 @@ with tab3:
     st.subheader("Confusion Matrix (table)")
     st.dataframe(cm_df)
 
-
-# ---------------- TAB 4 ----------------
 with tab4:
     st.header("Final Summary (simple view)")
 
